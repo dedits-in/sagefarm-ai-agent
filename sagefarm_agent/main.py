@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from crewai import Crew, Process
-from tasks import create_advisory_task, python_risk_analysis, python_search
+from tasks import create_advisory_task, create_followup_task, python_risk_analysis, python_search
 from agents import advisor
 from dotenv import load_dotenv
 import os
@@ -32,7 +32,7 @@ app.add_middleware(
 )
 
 
-# ── Request model ──────────────────────────────────────────────────────────
+# ── Request models ────────────────────────────────────────────────────────
 class ClientProfile(BaseModel):
     name: str
     age: int
@@ -47,7 +47,15 @@ class ClientProfile(BaseModel):
     risk_profile: str
 
 
-# ── Health check ───────────────────────────────────────────────────────────
+class ChatMessage(BaseModel):
+    client_profile: ClientProfile
+    risk_analysis: str
+    research_output: str
+    investment_plan: str
+    user_message: str
+
+
+# ── Health check ──────────────────────────────────────────────────────────
 @app.get("/")
 def root():
     return {
@@ -55,6 +63,7 @@ def root():
         "architecture": "Search Tool → Python Risk Analysis → Single Advisor LLM",
         "endpoints": {
             "POST /analyse": "Submit client profile → get investment plan",
+            "POST /chat": "Interactive follow-ups with context awareness",
             "GET /ui": "Open the UI",
         }
     }
@@ -114,7 +123,48 @@ async def analyse_client(profile: ClientProfile):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── UI ─────────────────────────────────────────────────────────────────────
+# ── Interactive chat endpoint ──────────────────────────────────────────────
+@app.post("/chat")
+async def chat_followup(chat: ChatMessage):
+    try:
+        client_data = chat.client_profile.model_dump()
+        print(f"\n💬 Follow-up: {chat.user_message}")
+
+        # Create follow-up task with full context
+        followup_task = create_followup_task(
+            client_data,
+            chat.risk_analysis,
+            chat.research_output,
+            chat.investment_plan,
+            chat.user_message
+        )
+
+        followup_crew = Crew(
+            agents=[advisor],
+            tasks=[followup_task],
+            process=Process.sequential,
+            verbose=False,
+        )
+        followup_crew.kickoff()
+        print("✅ Follow-up plan generated")
+
+        # Read updated plan
+        updated_plan = "Updated plan generated."
+        if os.path.exists("output/investment_plan.md"):
+            with open("output/investment_plan.md", "r", encoding="utf-8") as f:
+                updated_plan = f.read()
+
+        return {
+            "status": "success",
+            "updated_plan": updated_plan,
+        }
+
+    except Exception as e:
+        print(f"❌ Chat Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── UI ─────────────────────────────────────────────────────────────
 @app.get("/ui", response_class=HTMLResponse)
 def ui():
     return """
@@ -139,13 +189,13 @@ def ui():
     input, select { width: 100%; padding: 10px 14px; border: 1.5px solid #e0e0e0; border-radius: 8px; font-size: 14px; background: #F5F7F7; outline: none; font-family: inherit; }
     input:focus, select:focus { border-color: #00897B; box-shadow: 0 0 0 3px rgba(0,137,123,0.1); }
     .full { grid-column: 1 / -1; }
-    button { width: 100%; padding: 13px; background: #00897B; color: white; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 8px; font-family: inherit; transition: background 0.2s; }
+    button { width: 100%; padding: 13px; background: #00897B; color: white; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 8px; font-family: inherit; }
     button:hover:not(:disabled) { background: #00695C; }
     button:disabled { opacity: 0.6; cursor: not-allowed; }
     .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
     .tab { padding: 7px 16px; border-radius: 20px; border: 1.5px solid #00897B; background: white; color: #00897B; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s; font-family: inherit; }
     .tab.active { background: #00897B; color: white; }
-    #result, #riskResult { white-space: pre-wrap; font-size: 14px; line-height: 1.75; color: #1a1a1a; display: none; }
+    #result, #riskResult, #chatBox { white-space: pre-wrap; font-size: 14px; line-height: 1.75; color: #1a1a1a; display: none; }
     .loading { text-align: center; color: #00897B; padding: 24px; font-size: 15px; }
     .dot { display: inline-block; animation: blink 1.4s infinite; }
     .dot:nth-child(2) { animation-delay: 0.2s; }
@@ -159,6 +209,13 @@ def ui():
     .step.pending { background: #f5f5f5; color: #aaa; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
     .disclaimer { font-size: 11px; color: #888; text-align: center; margin-top: 10px; }
+    .chat-input-group { display: flex; gap: 8px; margin-top: 12px; }
+    #chatInput { flex: 1; padding: 10px 14px; border: 1.5px solid #e0e0e0; border-radius: 8px; font-size: 14px; background: #F5F7F7; }
+    #sendBtn { width: auto; padding: 10px 20px; }
+    .chat-history { max-height: 400px; overflow-y: auto; margin-bottom: 12px; padding: 12px; background: #F5F7F7; border-radius: 8px; }
+    .chat-message { margin-bottom: 10px; padding: 8px 12px; border-radius: 8px; }
+    .user-msg { background: #00897B; color: white; text-align: right; }
+    .assistant-msg { background: #E0F2F1; color: #1a1a1a; }
   </style>
 </head>
 <body>
@@ -224,17 +281,16 @@ def ui():
       <h2>Results</h2>
       <div id="badge" class="badge"></div>
 
-      <!-- Progress steps -->
       <div class="steps" id="steps" style="display:none">
         <div class="step pending" id="s1">① Risk Analysis</div>
         <div class="step pending" id="s2">② Research</div>
         <div class="step pending" id="s3">③ Investment Plan</div>
       </div>
 
-      <!-- Tabs -->
       <div class="tabs" id="tabs" style="display:none">
         <button class="tab active" onclick="showTab('plan')">📋 Investment Plan</button>
         <button class="tab" onclick="showTab('risk')">📊 Risk Analysis</button>
+        <button class="tab" onclick="showTab('chat')">💬 Ask Follow-ups</button>
       </div>
 
       <div id="loadingDiv" class="loading" style="display:none">
@@ -242,14 +298,28 @@ def ui():
       </div>
       <div id="result"></div>
       <div id="riskResult"></div>
+      
+      <div id="chatBox">
+        <div class="chat-history" id="chatHistory"></div>
+        <div class="chat-input-group">
+          <input id="chatInput" type="text" placeholder="e.g., Make it more aggressive, Reduce SIP to 8000..."/>
+          <button id="sendBtn" onclick="sendChat()">Send</button>
+        </div>
+      </div>
     </div>
   </div>
 
   <script>
+    let currentProfile = {};
+    let currentRiskAnalysis = "";
+    let currentResearch = "";
+    let currentPlan = "";
+
     function showTab(tab) {
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
       document.getElementById('result').style.display    = tab === 'plan' ? 'block' : 'none';
       document.getElementById('riskResult').style.display = tab === 'risk' ? 'block' : 'none';
+      document.getElementById('chatBox').style.display = tab === 'chat' ? 'block' : 'none';
       event.target.classList.add('active');
     }
 
@@ -303,7 +373,6 @@ def ui():
       setStep(1);
       badge.textContent = `${profile.risk_profile} Risk  •  ${profile.goal}  •  ${profile.timeline} years`;
 
-      // Simulate step progress in UI
       setTimeout(() => setStep(2), 2000);
       setTimeout(() => setStep(3), 12000);
 
@@ -316,12 +385,19 @@ def ui():
         const data = await res.json();
 
         if (data.status === 'success') {
+          currentProfile = profile;
+          currentRiskAnalysis = data.risk_analysis;
+          currentResearch = data.research_output || "";
+          currentPlan = data.investment_plan;
+          
           ['s1','s2','s3'].forEach(id => document.getElementById(id).className = 'step done');
           loadingDiv.style.display = 'none';
           tabs.style.display = 'flex';
           result.style.display = 'block';
           result.textContent = data.investment_plan;
           riskResult.textContent = data.risk_analysis;
+          
+          document.getElementById('chatHistory').innerHTML = '';
         } else {
           loadingDiv.style.display = 'none';
           result.style.display = 'block';
@@ -336,6 +412,58 @@ def ui():
         btn.textContent = '🚀 Generate Investment Plan';
       }
     }
+
+    async function sendChat() {
+      const input = document.getElementById('chatInput').value.trim();
+      if (!input) return;
+
+      const chatHistory = document.getElementById('chatHistory');
+      
+      // Add user message
+      const userMsg = document.createElement('div');
+      userMsg.className = 'chat-message user-msg';
+      userMsg.textContent = input;
+      chatHistory.appendChild(userMsg);
+      
+      document.getElementById('chatInput').value = '';
+
+      // Add loading message
+      const loadingMsg = document.createElement('div');
+      loadingMsg.className = 'chat-message assistant-msg';
+      loadingMsg.textContent = '🤖 Updating your plan...';
+      chatHistory.appendChild(loadingMsg);
+      chatHistory.scrollTop = chatHistory.scrollHeight;
+
+      try {
+        const res = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            client_profile: currentProfile,
+            risk_analysis: currentRiskAnalysis,
+            research_output: currentResearch,
+            investment_plan: currentPlan,
+            user_message: input,
+          }),
+        });
+        const data = await res.json();
+
+        if (data.status === 'success') {
+          currentPlan = data.updated_plan;
+          loadingMsg.textContent = data.updated_plan;
+          document.getElementById('result').textContent = data.updated_plan;
+        } else {
+          loadingMsg.textContent = 'Error updating plan. Try again.';
+        }
+      } catch (err) {
+        loadingMsg.textContent = 'Error: ' + err.message;
+      }
+      chatHistory.scrollTop = chatHistory.scrollHeight;
+    }
+
+    document.getElementById('chatInput').addEventListener('keypress', function(e) {
+      if (e.key === 'Enter') sendChat();
+    });
   </script>
 </body>
 </html>

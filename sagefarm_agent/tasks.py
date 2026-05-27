@@ -120,3 +120,23 @@ def create_advisory_task(client_profile: dict, risk_analysis: str, research_outp
         agent=advisor,
         output_file="output/investment_plan.md",
     )
+
+
+# ── Follow-up chat task (maintains full context) ────────────────────────────
+def create_followup_task(client_profile: dict, risk_analysis: str, research_output: str, previous_plan: str, user_message: str) -> Task:
+    return Task(
+        description=(
+            f"Update the investment plan for {client_profile['name']} based on their feedback.\n\n"
+            f"ORIGINAL CLIENT DATA:\n"
+            f"Age: {client_profile['age']}, Income: ₹{client_profile['income']:,}, Savings: ₹{client_profile['savings']:,}, Goal: {client_profile['goal']}, Timeline: {client_profile['timeline']} years\n\n"
+            f"RISK ANALYSIS:\n{risk_analysis}\n\n"
+            f"MARKET RESEARCH:\n{research_output}\n\n"
+            f"PREVIOUS PLAN:\n{previous_plan}\n\n"
+            f"USER FEEDBACK:\n{user_message}\n\n"
+            f"Update the plan based on their feedback. Maintain the 5-section format.\n"
+            f"Be concise and actionable. Under 280 words. Warm, jargon-free tone."
+        ),
+        expected_output="Updated investment plan incorporating user feedback.",
+        agent=advisor,
+        output_file="output/investment_plan.md",
+    )
